@@ -350,26 +350,29 @@ app.get('/details', async (req, res) => {
         }));
     }
 
-    const payload = {
-      tmdb_id: id,
-      title: data.title || data.name,
-      description: data.overview || '',
-      poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
-      backdrop: data.backdrop_path
-        ? `https://image.tmdb.org/t/p/original${data.backdrop_path}`
-        : null,
-      release_date: data.release_date || data.first_air_date,
-      runtime: data.runtime || null,
-      genres: (data.genres || []).map((g) => g.name),
-      embedUrl:
-        type === 'movie'
-          ? `https://vidsrc.to/embed/movie/${id}`
-          : `https://vidsrc.to/embed/tv/${data.external_ids?.imdb_id || id}`,
-      trailerUrl,
-      similar,
-      type,
-    };
-
+ const payload = {
+  tmdb_id: id,
+  title: data.title || data.name,
+  description: data.overview || '',
+  poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+  backdrop: data.backdrop_path
+    ? `https://image.tmdb.org/t/p/original${data.backdrop_path}`
+    : null,
+  release_date: data.release_date || data.first_air_date,
+  runtime: data.runtime || null,
+  genres: (data.genres || []).map((g) => g.name),
+  embedUrls: {
+    server1: type === 'movie'
+      ? `https://vidsrc.to/embed/movie/${id}`
+      : `https://vidsrc.to/embed/tv/${data.external_ids?.imdb_id || id}`,
+    server2: type === 'movie'
+      ? `https://embed.q62movies.ws/movie?tmdbId=${id}`
+      : `https://embed.q62movies.ws/tv-show?tvdbId=${data.external_ids?.tvdb_id || ''}&s=1&e=1`,
+  },
+  trailerUrl,
+  similar,
+  type,
+};
     // 🎞 TV-specific: add seasons
     if (type === 'tv') {
       payload.imdb_id = data.external_ids?.imdb_id;
