@@ -363,16 +363,16 @@ app.get('/details', async (req, res) => {
   genres: (data.genres || []).map((g) => g.name),
  embedUrls: {
   server1: type === 'movie'
-    ? `https://vidsrc.to/embed/movie/${id}`
-    : `https://vidsrc.to/embed/tv/${data.external_ids?.imdb_id || id}`,
+    ? `https://vidsrcme.su/embed/movie/${id}`
+    : `https://vidsrcme.su/embed/tv/${data.external_ids?.imdb_id || id}`,
 
   server2: type === 'movie'
     ? `https://embed.q62movies.ws/movie?tmdbId=${id}`
     : `https://embed.q62movies.ws/tv-show?tvdbId=${data.external_ids?.tvdb_id || ''}&s=1&e=1`, // defaults to S1E1
 
   server3: type === 'movie'
-    ? `https://vidsrc.xyz/embed/movie?${data.external_ids?.imdb_id ? `imdb=${data.external_ids.imdb_id}` : `tmdb=${id}`}`
-    : `https://vidsrc.xyz/embed/tv?${data.external_ids?.imdb_id ? `imdb=${data.external_ids.imdb_id}` : `tmdb=${id}`}`
+    ? `https://vidsrc-embed.ru/embed/movie?${data.external_ids?.imdb_id ? `imdb=${data.external_ids.imdb_id}` : `tmdb=${id}`}`
+    : `https://vidsrc-embed.ru/embed/tv?${data.external_ids?.imdb_id ? `imdb=${data.external_ids.imdb_id}` : `tmdb=${id}`}`
 },
   trailerUrl,
   similar,
