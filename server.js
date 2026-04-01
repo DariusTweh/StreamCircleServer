@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const cacheMiddleware = require('./cacheMiddleware');
+const curatedTvCollections = require('../data/curatedTvCollections');
 
 
 require('dotenv').config();
@@ -54,7 +55,7 @@ function normalizeSearchItem(item) {
   };
 }
 
-function normalizeSuggestedItem(item, type) {
+function normalizeRailItem(item, type) {
   return {
     tmdb_id: item.id,
     title: item.title || item.name,
@@ -64,52 +65,138 @@ function normalizeSuggestedItem(item, type) {
     backdrop: item.backdrop_path
       ? `https://image.tmdb.org/t/p/original${item.backdrop_path}`
       : null,
-    rating: item.vote_average || 0,
-    year: (item.release_date || item.first_air_date || '').split('-')[0] || 'N/A',
+    release_date: item.release_date || item.first_air_date || null,
+    vote_average: item.vote_average ?? null,
     type,
+    overview: item.overview || '',
   };
 }
 
-async function fetchSuggestedTitles(type, id) {
-  let candidates = [];
+function normalizeDetailedRailItem(item, type) {
+  return {
+    tmdb_id: item.id,
+    title: item.title || item.name,
+    poster: item.poster_path
+      ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+      : null,
+    backdrop: item.backdrop_path
+      ? `https://image.tmdb.org/t/p/original${item.backdrop_path}`
+      : null,
+    release_date: item.release_date || item.first_air_date || null,
+    vote_average: item.vote_average ?? null,
+    type,
+    overview: item.overview || '',
+  };
+}
+
+function sortByReleaseDateAscending(items) {
+  return [...items].sort((left, right) => {
+    const leftDate = left.release_date ? new Date(left.release_date).getTime() : Number.MAX_SAFE_INTEGER;
+    const rightDate = right.release_date ? new Date(right.release_date).getTime() : Number.MAX_SAFE_INTEGER;
+
+    return leftDate - rightDate;
+  });
+}
+
+async function fetchTmdbResults(endpoint, type) {
+  try {
+    const response = await axios.get(`https://api.themoviedb.org/3/${endpoint}`, {
+      params: {
+        api_key: TMDB_API_KEY,
+        language: 'en-US',
+        page: 1,
+      },
+    });
+
+    return (response.data.results || [])
+      .filter((item) => item.id && (item.title || item.name))
+      .slice(0, 10)
+      .map((item) => normalizeRailItem(item, type));
+  } catch (error) {
+    console.error(`${endpoint} failed:`, error.response?.data || error.message);
+    return [];
+  }
+}
+
+async function fetchMovieCollection(collection) {
+  if (!collection?.id) {
+    return null;
+  }
 
   try {
-    const recommendationResponse = await axios.get(
-      `https://api.themoviedb.org/3/${type}/${id}/recommendations`,
+    const response = await axios.get(
+      `https://api.themoviedb.org/3/collection/${collection.id}`,
       {
-        params: { api_key: TMDB_API_KEY, language: 'en-US', page: 1 },
+        params: {
+          api_key: TMDB_API_KEY,
+          language: 'en-US',
+        },
       }
     );
 
-    candidates = recommendationResponse.data.results || [];
+    const parts = sortByReleaseDateAscending(
+      (response.data.parts || []).map((item) => normalizeRailItem(item, 'movie'))
+    );
+
+    return {
+      id: response.data.id,
+      name: response.data.name,
+      parts,
+    };
   } catch (error) {
-    console.error(`${type} recommendations failed:`, error.response?.data || error.message);
+    console.error('Movie collection fetch failed:', error.response?.data || error.message);
+    return null;
   }
-
-  if (!candidates.length || candidates.length < 5) {
-    try {
-      const similarResponse = await axios.get(
-        `https://api.themoviedb.org/3/${type}/${id}/similar`,
-        {
-          params: { api_key: TMDB_API_KEY, language: 'en-US', page: 1 },
-        }
-      );
-
-      candidates = similarResponse.data.results || candidates;
-    } catch (error) {
-      console.error(`${type} similar failed:`, error.response?.data || error.message);
-    }
-  }
-
-  return candidates
-    .filter((item) => item.poster_path && (item.title || item.name))
-    .slice(0, 10)
-    .map((item) => normalizeSuggestedItem(item, type));
 }
 
-function buildDetailsPayload(data, type, similar, trailerUrl) {
+async function fetchCuratedTvCollectionItems(ids = []) {
+  const items = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const response = await axios.get(`https://api.themoviedb.org/3/tv/${id}`, {
+          params: {
+            api_key: TMDB_API_KEY,
+            language: 'en-US',
+          },
+        });
+
+        return normalizeDetailedRailItem(response.data, 'tv');
+      } catch (error) {
+        console.error(`Curated TV lookup failed for ${id}:`, error.response?.data || error.message);
+        return null;
+      }
+    })
+  );
+
+  return items.filter(Boolean);
+}
+
+async function resolveCuratedTvCollections(collectionId) {
+  const selectedCollections = collectionId
+    ? curatedTvCollections.filter((collection) => collection.id === collectionId)
+    : curatedTvCollections;
+
+  const collections = await Promise.all(
+    selectedCollections.map(async (collection) => ({
+      id: collection.id,
+      title: collection.title,
+      subtitle: collection.subtitle,
+      items: await fetchCuratedTvCollectionItems(collection.items),
+    }))
+  );
+
+  return collectionId ? collections[0] || null : collections;
+}
+
+function buildDetailsPayload(data, type, options = {}) {
   const externalIds = data.external_ids || {};
   const id = data.id;
+  const {
+    trailerUrl = null,
+    similar = [],
+    recommendations = [],
+    movieCollection = null,
+  } = options;
 
   const payload = {
     tmdb_id: id,
@@ -124,30 +211,35 @@ function buildDetailsPayload(data, type, similar, trailerUrl) {
     genres: (data.genres || []).map((genre) => genre.name),
     embedUrl:
       type === 'movie'
-        ? `https://vidsrc.to/embed/movie/${id}`
-        : `https://vidsrc.to/embed/tv/${externalIds.imdb_id || id}`,
+        ? `https://vidsrc-embed.ru/embed/movie?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`
+        : `https://vidsrc-embed.ru/embed/tv?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`,
     embedUrls: {
       server1:
         type === 'movie'
-          ? `https://vidsrcme.su/embed/movie/${id}`
-          : `https://vidsrcme.su/embed/tv/${externalIds.imdb_id || id}`,
+          ? `https://vidsrc-embed.ru/embed/movie?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`
+          : `https://vidsrc-embed.ru/embed/tv?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`,
       server2:
         type === 'movie'
           ? `https://embed.q62movies.ws/movie?tmdbId=${id}`
           : `https://embed.q62movies.ws/tv-show?tvdbId=${externalIds.tvdb_id || ''}&s=1&e=1`,
       server3:
         type === 'movie'
-          ? `https://vidsrc-embed.ru/embed/movie?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`
-          : `https://vidsrc-embed.ru/embed/tv?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`,
+          ? `https://vidsrcme.su/embed/movie/${id}`
+          : `https://vidsrcme.su/embed/tv/${externalIds.imdb_id || id}`,
     },
     trailerUrl,
     similar,
     type,
   };
 
+  if (type === 'movie' && movieCollection) {
+    payload.movieCollection = movieCollection;
+  }
+
   if (type === 'tv') {
     payload.imdb_id = externalIds.imdb_id || null;
     payload.tvdb_id = externalIds.tvdb_id || null;
+    payload.recommendations = recommendations;
     payload.seasons = (data.seasons || [])
       .filter((season) => season.season_number !== 0)
       .map((season) => ({
@@ -410,6 +502,65 @@ app.get('/homepage/genres', async (req, res) => {
     res.status(500).json({ error: 'Genre homepage fetch failed' });
   }
 });
+
+app.get(
+  '/collections/tv/curated',
+  cacheMiddleware((req) => `tv-curated:${req.query.id || 'all'}`, 600),
+  async (req, res) => {
+    try {
+      const collection = await resolveCuratedTvCollections(req.query.id);
+
+      if (req.query.id) {
+        if (!collection) {
+          return res.status(404).json({ error: 'Collection not found' });
+        }
+
+        return res.json(collection);
+      }
+
+      res.json(collection);
+    } catch (error) {
+      console.error('Curated TV collections failed:', error.message);
+      res.status(500).json({ error: 'Failed to fetch curated TV collections' });
+    }
+  }
+);
+
+app.get(
+  '/collections/tv/dynamic',
+  cacheMiddleware((req) => `tv-dynamic:${req.query.kind || 'unknown'}:${req.query.id || 'none'}`, 300),
+  async (req, res) => {
+    const { kind, id } = req.query;
+
+    if (!kind) {
+      return res.status(400).json({ error: 'Missing kind query parameter' });
+    }
+
+    const supportedKinds = new Set(['recommendations', 'similar', 'popular', 'top_rated']);
+
+    if (!supportedKinds.has(kind)) {
+      return res.status(400).json({ error: 'Unsupported TV collection kind' });
+    }
+
+    if ((kind === 'recommendations' || kind === 'similar') && !id) {
+      return res.status(400).json({ error: 'Missing id for show-specific TV collection kind' });
+    }
+
+    const endpoint =
+      kind === 'popular' || kind === 'top_rated'
+        ? `tv/${kind}`
+        : `tv/${id}/${kind}`;
+
+    try {
+      const items = await fetchTmdbResults(endpoint, 'tv');
+      res.json({ kind, id: id || null, items });
+    } catch (error) {
+      console.error('Dynamic TV collection fetch failed:', error.message);
+      res.status(500).json({ error: 'Failed to fetch dynamic TV collection' });
+    }
+  }
+);
+
 app.get('/details', async (req, res) => {
   const id = req.query.id;
   const type = req.query.type || 'movie';
@@ -431,8 +582,30 @@ app.get('/details', async (req, res) => {
     );
     const trailerUrl = trailer ? `https://www.youtube.com/embed/${trailer.key}` : null;
 
-    const similar = await fetchSuggestedTitles(type, id);
-    const payload = buildDetailsPayload(data, type, similar, trailerUrl);
+    let similar = [];
+    let recommendations = [];
+    let movieCollection = null;
+
+    if (type === 'movie') {
+      recommendations = await fetchTmdbResults(`movie/${id}/recommendations`, 'movie');
+      if (recommendations.length >= 5) {
+        similar = recommendations;
+      } else {
+        const fallbackSimilar = await fetchTmdbResults(`movie/${id}/similar`, 'movie');
+        similar = fallbackSimilar.length ? fallbackSimilar : recommendations;
+      }
+      movieCollection = await fetchMovieCollection(data.belongs_to_collection);
+    } else {
+      recommendations = await fetchTmdbResults(`tv/${id}/recommendations`, 'tv');
+      similar = await fetchTmdbResults(`tv/${id}/similar`, 'tv');
+    }
+
+    const payload = buildDetailsPayload(data, type, {
+      trailerUrl,
+      similar,
+      recommendations,
+      movieCollection,
+    });
 
     res.json(payload);
   } catch (err) {
