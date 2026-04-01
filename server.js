@@ -37,6 +37,131 @@ function normalizeTMDBItem(item, type) {
     type,
   };
 }
+
+function normalizeSearchItem(item) {
+  return {
+    tmdb_id: item.id,
+    title: item.title || item.name || '',
+    poster: item.poster_path
+      ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+      : null,
+    type: item.media_type,
+    vote_average: item.vote_average || 0,
+    release_date: item.release_date || item.first_air_date || null,
+    adult: Boolean(item.adult),
+    genre_ids: item.genre_ids || [],
+    overview: item.overview || '',
+  };
+}
+
+function normalizeSuggestedItem(item, type) {
+  return {
+    tmdb_id: item.id,
+    title: item.title || item.name,
+    poster: item.poster_path
+      ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+      : null,
+    backdrop: item.backdrop_path
+      ? `https://image.tmdb.org/t/p/original${item.backdrop_path}`
+      : null,
+    rating: item.vote_average || 0,
+    year: (item.release_date || item.first_air_date || '').split('-')[0] || 'N/A',
+    type,
+  };
+}
+
+async function fetchSuggestedTitles(type, id) {
+  let candidates = [];
+
+  try {
+    const recommendationResponse = await axios.get(
+      `https://api.themoviedb.org/3/${type}/${id}/recommendations`,
+      {
+        params: { api_key: TMDB_API_KEY, language: 'en-US', page: 1 },
+      }
+    );
+
+    candidates = recommendationResponse.data.results || [];
+  } catch (error) {
+    console.error(`${type} recommendations failed:`, error.response?.data || error.message);
+  }
+
+  if (!candidates.length || candidates.length < 5) {
+    try {
+      const similarResponse = await axios.get(
+        `https://api.themoviedb.org/3/${type}/${id}/similar`,
+        {
+          params: { api_key: TMDB_API_KEY, language: 'en-US', page: 1 },
+        }
+      );
+
+      candidates = similarResponse.data.results || candidates;
+    } catch (error) {
+      console.error(`${type} similar failed:`, error.response?.data || error.message);
+    }
+  }
+
+  return candidates
+    .filter((item) => item.poster_path && (item.title || item.name))
+    .slice(0, 10)
+    .map((item) => normalizeSuggestedItem(item, type));
+}
+
+function buildDetailsPayload(data, type, similar, trailerUrl) {
+  const externalIds = data.external_ids || {};
+  const id = data.id;
+
+  const payload = {
+    tmdb_id: id,
+    title: data.title || data.name,
+    description: data.overview || '',
+    poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+    backdrop: data.backdrop_path
+      ? `https://image.tmdb.org/t/p/original${data.backdrop_path}`
+      : null,
+    release_date: data.release_date || data.first_air_date || null,
+    runtime: data.runtime || data.episode_run_time?.[0] || null,
+    genres: (data.genres || []).map((genre) => genre.name),
+    embedUrl:
+      type === 'movie'
+        ? `https://vidsrc.to/embed/movie/${id}`
+        : `https://vidsrc.to/embed/tv/${externalIds.imdb_id || id}`,
+    embedUrls: {
+      server1:
+        type === 'movie'
+          ? `https://vidsrcme.su/embed/movie/${id}`
+          : `https://vidsrcme.su/embed/tv/${externalIds.imdb_id || id}`,
+      server2:
+        type === 'movie'
+          ? `https://embed.q62movies.ws/movie?tmdbId=${id}`
+          : `https://embed.q62movies.ws/tv-show?tvdbId=${externalIds.tvdb_id || ''}&s=1&e=1`,
+      server3:
+        type === 'movie'
+          ? `https://vidsrc-embed.ru/embed/movie?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`
+          : `https://vidsrc-embed.ru/embed/tv?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`,
+    },
+    trailerUrl,
+    similar,
+    type,
+  };
+
+  if (type === 'tv') {
+    payload.imdb_id = externalIds.imdb_id || null;
+    payload.tvdb_id = externalIds.tvdb_id || null;
+    payload.seasons = (data.seasons || [])
+      .filter((season) => season.season_number !== 0)
+      .map((season) => ({
+        season_number: season.season_number,
+        name: season.name,
+        poster: season.poster_path
+          ? `https://image.tmdb.org/t/p/w500${season.poster_path}`
+          : null,
+        episode_count: season.episode_count,
+      }));
+  }
+
+  return payload;
+}
 // Route: /search
 app.get('/search', async (req, res) => {
   const query = req.query.q;
@@ -51,22 +176,9 @@ app.get('/search', async (req, res) => {
       },
     });
 
-   const results = response.data.results
-  .filter((item) => item.media_type === 'movie' || item.media_type === 'tv')
-  .map((item) => ({
-    title: item.title || item.name,
-    tmdb_id: item.id,
-    poster: item.poster_path
-      ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
-      : null,
-    type: item.media_type, // 'movie' or 'tv'
-    vote_average: item.vote_average || 0,
-    release_date: item.release_date || item.first_air_date || 'N/A',
-    adult: item.adult || false,
-    genre_ids: item.genre_ids || [],
-    overview: item.overview || '',
-  }));
-
+    const results = response.data.results
+      .filter((item) => item.media_type === 'movie' || item.media_type === 'tv')
+      .map(normalizeSearchItem);
 
     res.json(results);
   } catch (err) {
@@ -298,7 +410,6 @@ app.get('/homepage/genres', async (req, res) => {
     res.status(500).json({ error: 'Genre homepage fetch failed' });
   }
 });
-// Route: /genre
 app.get('/details', async (req, res) => {
   const id = req.query.id;
   const type = req.query.type || 'movie';
@@ -315,173 +426,13 @@ app.get('/details', async (req, res) => {
 
     const data = response.data;
 
-    // 🔍 Grab trailer (YouTube only)
     const trailer = data.videos?.results?.find(
       (v) => v.type === 'Trailer' && v.site === 'YouTube'
     );
     const trailerUrl = trailer ? `https://www.youtube.com/embed/${trailer.key}` : null;
 
-    // 📌 Grab recommendations first
-    let similar = [];
-    if (type === 'movie') {
-      let recRes = await axios.get(`https://api.themoviedb.org/3/movie/${id}/recommendations`, {
-        params: { api_key: TMDB_API_KEY, language: 'en-US', page: 1 },
-      });
-
-      let candidates = recRes.data.results;
-
-      // ⛳ fallback to similar if not enough recommendations
-      if (!candidates || candidates.length < 5) {
-        const simRes = await axios.get(`https://api.themoviedb.org/3/movie/${id}/similar`, {
-          params: { api_key: TMDB_API_KEY, language: 'en-US', page: 1 },
-        });
-        candidates = simRes.data.results;
-      }
-
-      similar = candidates
-        .filter((m) => m.poster_path)
-        .slice(0, 10)
-        .map((m) => ({
-          tmdb_id: m.id,
-          title: m.title,
-          poster: `https://image.tmdb.org/t/p/w500${m.poster_path}`,
-          rating: m.vote_average,
-          year: m.release_date?.split('-')[0],
-        }));
-    }
-
- const payload = {
-  tmdb_id: id,
-  title: data.title || data.name,
-  description: data.overview || '',
-  poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
-  backdrop: data.backdrop_path
-    ? `https://image.tmdb.org/t/p/original${data.backdrop_path}`
-    : null,
-  release_date: data.release_date || data.first_air_date,
-  runtime: data.runtime || null,
-  genres: (data.genres || []).map((g) => g.name),
- embedUrls: {
-  server1: type === 'movie'
-    ? `https://vidsrcme.su/embed/movie/${id}`
-    : `https://vidsrcme.su/embed/tv/${data.external_ids?.imdb_id || id}`,
-
-  server2: type === 'movie'
-    ? `https://embed.q62movies.ws/movie?tmdbId=${id}`
-    : `https://embed.q62movies.ws/tv-show?tvdbId=${data.external_ids?.tvdb_id || ''}&s=1&e=1`, // defaults to S1E1
-
-  server3: type === 'movie'
-    ? `https://vidsrc-embed.ru/embed/movie?${data.external_ids?.imdb_id ? `imdb=${data.external_ids.imdb_id}` : `tmdb=${id}`}`
-    : `https://vidsrc-embed.ru/embed/tv?${data.external_ids?.imdb_id ? `imdb=${data.external_ids.imdb_id}` : `tmdb=${id}`}`
-},
-  trailerUrl,
-  similar,
-  type,
-};
-    // 🎞 TV-specific: add seasons
-    if (type === 'tv') {
-      payload.imdb_id = data.external_ids?.imdb_id;
-      payload.seasons = (data.seasons || [])
-        .filter((s) => s.season_number !== 0)
-        .map((s) => ({
-          season_number: s.season_number,
-          name: s.name,
-          poster: s.poster_path
-            ? `https://image.tmdb.org/t/p/w500${s.poster_path}`
-            : 'https://placehold.co/300x450?text=No+Image',
-          episode_count: s.episode_count,
-        }));
-    }
-
-    res.json(payload);
-  } catch (err) {
-    console.error('TMDB details failed:', err.message);
-    res.status(500).json({ error: 'TMDB details failed', details: err.message });
-  }
-});
-
-// Route: /details
-app.get('/details', async (req, res) => {
-  const id = req.query.id;
-  const type = req.query.type || 'movie';
-
-  if (!id) return res.status(400).json({ error: 'Missing TMDB ID' });
-
-  try {
-    // Main details
-    const response = await axios.get(`https://api.themoviedb.org/3/${type}/${id}`, {
-      params: {
-        api_key: TMDB_API_KEY,
-        append_to_response: 'external_ids,videos',
-      },
-    });
-
-    const data = response.data;
-
-    // Get trailer from TMDB videos
-    const trailer = data.videos?.results?.find(
-      (v) => v.type === 'Trailer' && v.site === 'YouTube'
-    );
-    const trailerUrl = trailer ? `https://www.youtube.com/embed/${trailer.key}` : null;
-
-    // Get similar movies (only for movies)
-    let similar = [];
-    if (type === 'movie') {
-      const simRes = await axios.get(`https://api.themoviedb.org/3/movie/${id}/similar`, {
-        params: {
-          api_key: TMDB_API_KEY,
-          language: 'en-US',
-          page: 1,
-        },
-      });
-
-      similar = simRes.data.results
-        .filter((m) => m.poster_path)
-        .slice(0, 10)
-        .map((m) => ({
-          tmdb_id: m.id,
-          title: m.title,
-          poster: `https://image.tmdb.org/t/p/w500${m.poster_path}`,
-          rating: m.vote_average,
-          year: m.release_date?.split('-')[0],
-        }));
-    }
-
-    // Main data
-    const payload = {
-      tmdb_id: id,
-      title: data.title || data.name,
-      description: data.overview || '',
-      poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
-      backdrop: data.backdrop_path
-        ? `https://image.tmdb.org/t/p/original${data.backdrop_path}`
-        : null,
-      release_date: data.release_date || data.first_air_date,
-      runtime: data.runtime || null,
-      genres: (data.genres || []).map((g) => g.name),
-      embedUrl:
-        type === 'movie'
-          ? `https://vidsrc.to/embed/movie/${id}`
-          : `https://vidsrc.to/embed/tv/${data.external_ids?.imdb_id || id}`,
-      trailerUrl,
-      similar,
-      type,
-    };
-
-    // TV-only extras
-    if (type === 'tv') {
-      payload.imdb_id = data.external_ids?.imdb_id;
-      payload.seasons = (data.seasons || [])
-        .filter((s) => s.season_number !== 0)
-        .map((s) => ({
-          season_number: s.season_number,
-          name: s.name,
-          poster: s.poster_path
-            ? `https://image.tmdb.org/t/p/w500${s.poster_path}`
-            : 'https://placehold.co/300x450?text=No+Image',
-          episode_count: s.episode_count,
-        }));
-    }
+    const similar = await fetchSuggestedTitles(type, id);
+    const payload = buildDetailsPayload(data, type, similar, trailerUrl);
 
     res.json(payload);
   } catch (err) {
