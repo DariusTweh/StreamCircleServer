@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const cacheMiddleware = require('./cacheMiddleware');
-const curatedTvCollections = require('../data/curatedTvCollections');
+const curatedTvCollections = require('./data/curatedTvCollections');
 
 
 require('dotenv').config();
