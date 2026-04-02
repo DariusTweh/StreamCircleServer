@@ -12,6 +12,13 @@ app.use(cors());
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 const PORT = process.env.PORT || 3000;
+const DETAIL_RAIL_LIMIT = 16;
+const HOME_RAIL_LIMIT = 18;
+const PRELOAD_RAIL_LIMIT = 16;
+const GENRE_TOP_LIMIT = 8;
+const GENRE_COMBO_LIMIT = 18;
+const EDITORS_PICK_LIMIT = 16;
+
 function normalizeTMDBItem(item, type) {
   const posterPath = item.poster_path
     ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
@@ -98,6 +105,56 @@ function sortByReleaseDateAscending(items) {
   });
 }
 
+function buildTmdbImage(path, size = 'w500') {
+  return path ? `https://image.tmdb.org/t/p/${size}${path}` : null;
+}
+
+function extractCertification(data, type) {
+  if (type === 'movie') {
+    const releaseDates = data.release_dates?.results || [];
+    const prioritized = [
+      ...releaseDates.filter((entry) => entry.iso_3166_1 === 'US'),
+      ...releaseDates.filter((entry) => entry.iso_3166_1 !== 'US'),
+    ];
+
+    for (const entry of prioritized) {
+      const match = (entry.release_dates || []).find((release) => release.certification);
+      if (match?.certification) {
+        return match.certification;
+      }
+    }
+
+    return null;
+  }
+
+  const contentRatings = data.content_ratings?.results || [];
+  const prioritized = [
+    ...contentRatings.filter((entry) => entry.iso_3166_1 === 'US'),
+    ...contentRatings.filter((entry) => entry.iso_3166_1 !== 'US'),
+  ];
+
+  for (const entry of prioritized) {
+    if (entry?.rating) {
+      return entry.rating;
+    }
+  }
+
+  return null;
+}
+
+function normalizeCreditPerson(person, role = '') {
+  if (!person?.id || !person?.name) {
+    return null;
+  }
+
+  return {
+    id: person.id,
+    name: person.name,
+    role,
+    profile: buildTmdbImage(person.profile_path, 'w185'),
+  };
+}
+
 async function fetchTmdbResults(endpoint, type) {
   try {
     const response = await axios.get(`https://api.themoviedb.org/3/${endpoint}`, {
@@ -110,7 +167,7 @@ async function fetchTmdbResults(endpoint, type) {
 
     return (response.data.results || [])
       .filter((item) => item.id && (item.title || item.name))
-      .slice(0, 10)
+      .slice(0, DETAIL_RAIL_LIMIT)
       .map((item) => normalizeRailItem(item, type));
   } catch (error) {
     console.error(`${endpoint} failed:`, error.response?.data || error.message);
@@ -190,6 +247,7 @@ async function resolveCuratedTvCollections(collectionId) {
 
 function buildDetailsPayload(data, type, options = {}) {
   const externalIds = data.external_ids || {};
+  const credits = data.credits || {};
   const id = data.id;
   const {
     trailerUrl = null,
@@ -197,6 +255,25 @@ function buildDetailsPayload(data, type, options = {}) {
     recommendations = [],
     movieCollection = null,
   } = options;
+  const cast = (credits.cast || [])
+    .map((person) => normalizeCreditPerson(person, person.character || 'Cast'))
+    .filter(Boolean)
+    .slice(0, 18);
+  const directors = (credits.crew || [])
+    .filter((person) => ['Director', 'Series Director'].includes(person.job))
+    .map((person) => normalizeCreditPerson(person, person.job))
+    .filter(Boolean);
+  const writers = (credits.crew || [])
+    .filter((person) => ['Writer', 'Screenplay', 'Story', 'Teleplay'].includes(person.job))
+    .map((person) => normalizeCreditPerson(person, person.job))
+    .filter(Boolean);
+  const creators = (data.created_by || [])
+    .map((person) => normalizeCreditPerson(person, 'Creator'))
+    .filter(Boolean);
+  const certification = extractCertification(data, type);
+  const spokenLanguages = (data.spoken_languages || [])
+    .map((language) => language.english_name || language.name)
+    .filter(Boolean);
 
   const payload = {
     tmdb_id: id,
@@ -209,6 +286,14 @@ function buildDetailsPayload(data, type, options = {}) {
     release_date: data.release_date || data.first_air_date || null,
     runtime: data.runtime || data.episode_run_time?.[0] || null,
     genres: (data.genres || []).map((genre) => genre.name),
+    rating_label: certification,
+    spoken_languages: spokenLanguages,
+    original_language: data.original_language || null,
+    cast,
+    directors,
+    writers,
+    creators,
+    starring_names: cast.slice(0, 6).map((person) => person.name),
     embedUrl:
       type === 'movie'
         ? `https://vidsrc-embed.ru/embed/movie?${externalIds.imdb_id ? `imdb=${externalIds.imdb_id}` : `tmdb=${id}`}`
@@ -240,6 +325,8 @@ function buildDetailsPayload(data, type, options = {}) {
     payload.imdb_id = externalIds.imdb_id || null;
     payload.tvdb_id = externalIds.tvdb_id || null;
     payload.recommendations = recommendations;
+    payload.number_of_seasons = data.number_of_seasons || payload.seasons?.length || 0;
+    payload.number_of_episodes = data.number_of_episodes || null;
     payload.seasons = (data.seasons || [])
       .filter((season) => season.season_number !== 0)
       .map((season) => ({
@@ -302,7 +389,7 @@ app.get('/genre/top', async (req, res) => {
 
     const results = response.data.results
       .filter(item => item.id && item.poster_path && (item.title || item.name))
-      .slice(0, 3)
+      .slice(0, GENRE_TOP_LIMIT)
       .map(item => normalizeTMDBItem(item, type));
 
     res.json(results);
@@ -394,7 +481,7 @@ app.get('/genre/combos', async (req, res) => {
 
       const items = response.data.results
         .filter(item => item.id && item.poster_path && (item.title || item.name))
-        .slice(0, 10)
+        .slice(0, GENRE_COMBO_LIMIT)
         .map(item => normalizeTMDBItem(item, type));
 
       if (items.length > 0) {
@@ -490,7 +577,7 @@ app.get('/homepage/genres', async (req, res) => {
 
       const items = response.data.results
         .filter(item => item.poster_path && (item.title || item.name))
-        .slice(0, 10)
+        .slice(0, HOME_RAIL_LIMIT)
         .map(item => normalizeTMDBItem(item, type));
 
       sections[genreId] = items;
@@ -571,7 +658,10 @@ app.get('/details', async (req, res) => {
     const response = await axios.get(`https://api.themoviedb.org/3/${type}/${id}`, {
       params: {
         api_key: TMDB_API_KEY,
-        append_to_response: 'external_ids,videos',
+        append_to_response:
+          type === 'movie'
+            ? 'external_ids,videos,credits,release_dates'
+            : 'external_ids,videos,credits,content_ratings',
       },
     });
 
@@ -659,7 +749,7 @@ const enrichData = async (items, type) => {
   return await Promise.all(
     items
       .filter((item) => item.poster_path)
-      .slice(0, 10)
+      .slice(0, PRELOAD_RAIL_LIMIT)
       .map(async (item) => {
         const details = await axios.get(`https://api.themoviedb.org/3/${type}/${item.id}`, {
           params: { api_key: TMDB_API_KEY },
@@ -849,7 +939,7 @@ app.get('/explore/editors', async (req, res) => {
     const shuffled = response.data.results
       .filter(item => item.poster_path && (item.title || item.name))
       .sort(() => 0.5 - Math.random()) // 🎲 Shuffle for variety
-      .slice(0, 10)
+      .slice(0, EDITORS_PICK_LIMIT)
       .map(item => normalizeTMDBItem(item, type));
 
     res.json(shuffled);
